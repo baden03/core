@@ -7,7 +7,7 @@ import voluptuous as vol
 from homeassistant.components import binary_sensor, mqtt
 from homeassistant.components.binary_sensor import (
     DEVICE_CLASSES_SCHEMA,
-    BinarySensorDevice,
+    BinarySensorEntity,
 )
 from homeassistant.const import (
     CONF_DEVICE,
@@ -107,7 +107,7 @@ class MqttBinarySensor(
     MqttAvailability,
     MqttDiscoveryUpdate,
     MqttEntityDeviceInfo,
-    BinarySensorDevice,
+    BinarySensorEntity,
 ):
     """Representation a binary sensor that is updated by MQTT."""
 
@@ -119,7 +119,11 @@ class MqttBinarySensor(
         self._sub_state = None
         self._expiration_trigger = None
         self._delay_listener = None
-        self._expired = None
+        expire_after = config.get(CONF_EXPIRE_AFTER)
+        if expire_after is not None and expire_after > 0:
+            self._expired = True
+        else:
+            self._expired = None
         device_config = config.get(CONF_DEVICE)
 
         MqttAttributes.__init__(self, config)
@@ -177,7 +181,7 @@ class MqttBinarySensor(
                 expiration_at = dt_util.utcnow() + timedelta(seconds=expire_after)
 
                 self._expiration_trigger = async_track_point_in_utc_time(
-                    self.hass, self.value_is_expired, expiration_at
+                    self.hass, self._value_is_expired, expiration_at
                 )
 
             value_template = self._config.get(CONF_VALUE_TEMPLATE)
@@ -185,17 +189,30 @@ class MqttBinarySensor(
                 payload = value_template.async_render_with_possible_json_value(
                     payload, variables={"entity_id": self.entity_id}
                 )
+                if not payload.strip():  # No output from template, ignore
+                    _LOGGER.debug(
+                        "Empty template output for entity: %s with state topic: %s. Payload: '%s', with value template '%s'",
+                        self._config[CONF_NAME],
+                        self._config[CONF_STATE_TOPIC],
+                        msg.payload,
+                        value_template,
+                    )
+                    return
+
             if payload == self._config[CONF_PAYLOAD_ON]:
                 self._state = True
             elif payload == self._config[CONF_PAYLOAD_OFF]:
                 self._state = False
             else:  # Payload is not for this entity
-                _LOGGER.warning(
-                    "No matching payload found for entity: %s with state topic: %s. Payload: %s, with value template %s",
+                template_info = ""
+                if value_template is not None:
+                    template_info = f", template output: '{payload}', with value template '{str(value_template)}'"
+                _LOGGER.info(
+                    "No matching payload found for entity: %s with state topic: %s. Payload: '%s'%s",
                     self._config[CONF_NAME],
                     self._config[CONF_STATE_TOPIC],
-                    payload,
-                    value_template,
+                    msg.payload,
+                    template_info,
                 )
                 return
 
@@ -233,7 +250,7 @@ class MqttBinarySensor(
         await MqttDiscoveryUpdate.async_will_remove_from_hass(self)
 
     @callback
-    def value_is_expired(self, *_):
+    def _value_is_expired(self, *_):
         """Triggered when value is expired."""
 
         self._expiration_trigger = None
